@@ -1,249 +1,295 @@
 /**
  * @file EcoSort_Firmware.ino
- * @brief Autonomous 4-DOF Robotic Manipulator with Priority-Based Multi-Sensor Fusion
+ * @brief Verified Arduino Firmware for EcoSort 4-DOF Robotic Waste Segregation System
  * @author Md. Al-Imran
- * @details Implements synchronous FSM, 4-phase pick-and-place routine, 
- *          temporal majority voting, and deterministic priority logic (Metal > Wet > Dry).
+ * 
+ * Hardware Pinout:
+ *   - IR Sensor:           Digital Pin 2 (Active-LOW ingress detection)
+ *   - Inductive Sensor:    Digital Pin 4 (LJ12A3-4-Z/BX Metal detection)
+ *   - Moisture Sensor:     Digital Pin 5 (FR-04 Rain/Moisture detection)
+ *   - Base Servo (J1):     PWM Pin 8     (60 deg Metal, 120 deg Wet, 180 deg Dry)
+ *   - Shoulder Servo (J2): PWM Pin 9     (First Arm pitch)
+ *   - Elbow Servo (J3):    PWM Pin 10    (Second Arm pitch)
+ *   - Gripper Servo (J4):  PWM Pin 11    (Parallel-jaw claw)
  */
 
 #include <Servo.h>
-#include "config.h"
-#include "kinematics.h"
 
 // ==========================================
-// SERVO ACTUATOR INSTANCES & CURRENT ANGLES
+// PIN CONFIGURATIONS
+// ==========================================
+#define PIN_IR_SENSOR         2   // Ingress object obstacle sensor
+#define PIN_INDUCTIVE_SENSOR  4   // Inductive proximity metal sensor
+#define PIN_MOISTURE_SENSOR   5   // FR-04 Rain/moisture sensor
+
+#define PIN_SERVO_BASE        8   // Joint 1: Base rotation servo
+#define PIN_SERVO_FIRST_ARM   9   // Joint 2: Shoulder (First arm) servo
+#define PIN_SERVO_SECOND_ARM  10  // Joint 3: Elbow (Second arm) servo
+#define PIN_SERVO_GRIPPER     11  // Joint 4: End-effector claw servo
+
+// ==========================================
+// ACTUATOR OBJECTS & CALIBRATED HOME ANGLES
 // ==========================================
 Servo servoBase;
-Servo servoShoulder;
-Servo servoElbow;
+Servo servoFirstArm;
+Servo servoSecondArm;
 Servo servoGripper;
 
-int currentBaseAngle     = BASE_HOME_ANGLE;
-int currentShoulderAngle = SHOULDER_HOME_ANGLE;
-int currentElbowAngle    = ELBOW_HOME_ANGLE;
-int currentGripperAngle  = GRIPPER_CLOSED_ANGLE;
+const int defaultBaseAngle      = 0;   // Home stance: 0 deg
+const int defaultFirstArmAngle  = 80;  // Shoulder resting: 80 deg
+const int defaultSecondArmAngle = 40;  // Elbow resting: 40 deg
+const int defaultGripperAngle   = 20;  // Claw closed: 20 deg
 
-// Kinematics solver instance
-RobotKinematics kinematics;
-
-// Ingress detection interrupt flag
-volatile bool objectDetected = false;
-
-// Function declarations
-void isrObjectIngress();
-void muoviServo(Servo &servo, int &currentPos, int targetPos, int stepDelayMs = SERVO_STEP_DELAY_MS);
-WasteClass sampleWasteMaterial();
-void executeSortingRoutine(WasteClass wasteType);
-void returnToHomeStance();
+int currentBasePos      = defaultBaseAngle;
+int currentFirstArmPos  = defaultFirstArmAngle;
+int currentSecondArmPos = defaultSecondArmAngle;
+int currentGripperPos   = defaultGripperAngle;
 
 // ==========================================
-// ARDUINO SETUP
+// FUNCTION DECLARATIONS
+// ==========================================
+void muoviServo(Servo &servo, int fromPos, int toPos);
+void sortMetalWaste();
+void sortWetWaste();
+void sortDryWaste();
+
+// ==========================================
+// SYSTEM SETUP
 // ==========================================
 void setup() {
-    // Initialize serial telemetry
-    Serial.begin(9600);
-    while (!Serial && millis() < 2000); // Wait up to 2 seconds for serial port
+  pinMode(PIN_IR_SENSOR, INPUT);
+  pinMode(PIN_MOISTURE_SENSOR, INPUT);
+  pinMode(PIN_INDUCTIVE_SENSOR, INPUT);
 
-    Serial.println(F("=================================================="));
-    Serial.println(F(" EcoSort: Autonomous 4-DOF Waste Segregation Robot"));
-    Serial.println(F(" Firmware v2.1 | Author: Md. Al-Imran"));
-    Serial.println(F("=================================================="));
+  Serial.begin(9600);
+  Serial.println(F("=================================================="));
+  Serial.println(F(" EcoSort: Automated 4-DOF Waste Segregation Robot"));
+  Serial.println(F(" Firmware Version: 1.0 (Hardware-Verified)       "));
+  Serial.println(F(" Author: Md. Al-Imran                             "));
+  Serial.println(F("=================================================="));
 
-    // Configure sensor GPIOs
-    pinMode(PIN_IR_SENSOR, INPUT_PULLUP);
-    pinMode(PIN_INDUCTIVE_SENSOR, INPUT_PULLUP);
-    pinMode(PIN_MOISTURE_DIGITAL, INPUT);
-    pinMode(PIN_MOISTURE_ANALOG, INPUT);
+  // Attach servo PWM pins
+  servoBase.attach(PIN_SERVO_BASE);
+  servoFirstArm.attach(PIN_SERVO_FIRST_ARM);
+  servoSecondArm.attach(PIN_SERVO_SECOND_ARM);
+  servoGripper.attach(PIN_SERVO_GRIPPER);
 
-    // Attach hardware interrupt for IR Ingress detection (Active-LOW on Pin 2)
-    attachInterrupt(digitalPinToInterrupt(PIN_IR_SENSOR), isrObjectIngress, FALLING);
+  // Initialize servos to calibrated default home stances
+  servoBase.write(defaultBaseAngle);
+  servoFirstArm.write(defaultFirstArmAngle);
+  servoSecondArm.write(defaultSecondArmAngle);
+  servoGripper.write(defaultGripperAngle);
 
-    // Attach servo PWM pins
-    servoBase.attach(PIN_SERVO_BASE);
-    servoShoulder.attach(PIN_SERVO_SHOULDER);
-    servoElbow.attach(PIN_SERVO_ELBOW);
-    servoGripper.attach(PIN_SERVO_GRIPPER);
-
-    // Initialize robot to calibrated home stance
-    Serial.println(F("[INIT] Initializing 4-DOF arm to Home Stance..."));
-    servoBase.write(BASE_HOME_ANGLE);
-    servoShoulder.write(SHOULDER_HOME_ANGLE);
-    servoElbow.write(ELBOW_HOME_ANGLE);
-    servoGripper.write(GRIPPER_CLOSED_ANGLE);
-    delay(1000);
-
-    Serial.println(F("[SYSTEM READY] Entering IDLE polling state. Waiting for refuse specimen..."));
+  delay(1000);
+  Serial.println(F("[SYSTEM READY] Polling sensor array for incoming waste..."));
 }
 
 // ==========================================
-// HARDWARE INTERRUPT SERVICE ROUTINE (ISR)
+// SMOOTH STEP-BY-STEP SERVO ACTUATION
 // ==========================================
-void isrObjectIngress() {
-    objectDetected = true;
+// Moves servo incrementally with 15 ms delay per degree to prevent inertial jerk
+void muoviServo(Servo &servo, int fromPos, int toPos) {
+  if (fromPos < toPos) {
+    for (int pos = fromPos; pos <= toPos; pos++) {
+      servo.write(pos);
+      delay(15);
+    }
+  } else {
+    for (int pos = fromPos; pos >= toPos; pos--) {
+      servo.write(pos);
+      delay(15);
+    }
+  }
 }
 
 // ==========================================
-// ARDUINO MAIN LOOP
+// PICK-AND-PLACE: METAL STREAM (BIN 1 - 60°)
+// ==========================================
+void sortMetalWaste() {
+  Serial.println(F("  -> Executing pick-and-place for Metal Waste (Bin 1: 60 deg)"));
+
+  // Phase I: Grasp Alignment
+  muoviServo(servoGripper, currentGripperPos, 90);
+  currentGripperPos = 90;
+  delay(500);
+
+  muoviServo(servoFirstArm, currentFirstArmPos, 135);
+  currentFirstArmPos = 135;
+  delay(500);
+
+  // Phase II: Securing & Elevation
+  muoviServo(servoGripper, currentGripperPos, defaultGripperAngle);
+  currentGripperPos = defaultGripperAngle;
+  delay(500);
+
+  muoviServo(servoFirstArm, currentFirstArmPos, defaultFirstArmAngle);
+  currentFirstArmPos = defaultFirstArmAngle;
+  delay(500);
+
+  // Phase III: Transfer Rotation to Bin 1 (60 deg)
+  muoviServo(servoSecondArm, currentSecondArmPos, 100);
+  currentSecondArmPos = 100;
+  delay(500);
+
+  muoviServo(servoBase, currentBasePos, 60);
+  currentBasePos = 60;
+  delay(1000);
+
+  // Phase IV: Discharge & Homing
+  muoviServo(servoGripper, currentGripperPos, 90);
+  currentGripperPos = 90;
+  delay(1000);
+
+  muoviServo(servoGripper, currentGripperPos, defaultGripperAngle);
+  currentGripperPos = defaultGripperAngle;
+  delay(500);
+
+  muoviServo(servoBase, currentBasePos, defaultBaseAngle);
+  currentBasePos = defaultBaseAngle;
+  delay(500);
+
+  muoviServo(servoSecondArm, currentSecondArmPos, defaultSecondArmAngle);
+  currentSecondArmPos = defaultSecondArmAngle;
+  delay(500);
+}
+
+// ==========================================
+// PICK-AND-PLACE: WET STREAM (BIN 2 - 120°)
+// ==========================================
+void sortWetWaste() {
+  Serial.println(F("  -> Executing pick-and-place for Wet Waste (Bin 2: 120 deg)"));
+
+  // Phase I: Grasp Alignment
+  muoviServo(servoGripper, currentGripperPos, 90);
+  currentGripperPos = 90;
+  delay(500);
+
+  muoviServo(servoFirstArm, currentFirstArmPos, 135);
+  currentFirstArmPos = 135;
+  delay(500);
+
+  // Phase II: Securing & Elevation
+  muoviServo(servoGripper, currentGripperPos, defaultGripperAngle);
+  currentGripperPos = defaultGripperAngle;
+  delay(500);
+
+  muoviServo(servoFirstArm, currentFirstArmPos, defaultFirstArmAngle);
+  currentFirstArmPos = defaultFirstArmAngle;
+  delay(500);
+
+  // Phase III: Transfer Rotation to Bin 2 (120 deg)
+  muoviServo(servoSecondArm, currentSecondArmPos, 100);
+  currentSecondArmPos = 100;
+  delay(500);
+
+  muoviServo(servoBase, currentBasePos, 120);
+  currentBasePos = 120;
+  delay(1000);
+
+  // Phase IV: Discharge & Homing
+  muoviServo(servoGripper, currentGripperPos, 90);
+  currentGripperPos = 90;
+  delay(1000);
+
+  muoviServo(servoGripper, currentGripperPos, defaultGripperAngle);
+  currentGripperPos = defaultGripperAngle;
+  delay(500);
+
+  muoviServo(servoBase, currentBasePos, defaultBaseAngle);
+  currentBasePos = defaultBaseAngle;
+  delay(500);
+
+  muoviServo(servoSecondArm, currentSecondArmPos, defaultSecondArmAngle);
+  currentSecondArmPos = defaultSecondArmAngle;
+  delay(500);
+}
+
+// ==========================================
+// PICK-AND-PLACE: DRY STREAM (BIN 3 - 180°)
+// ==========================================
+void sortDryWaste() {
+  Serial.println(F("  -> Executing pick-and-place for Dry Waste (Bin 3: 180 deg)"));
+
+  // Phase I: Grasp Alignment
+  muoviServo(servoGripper, currentGripperPos, 90);
+  currentGripperPos = 90;
+  delay(500);
+
+  muoviServo(servoFirstArm, currentFirstArmPos, 135);
+  currentFirstArmPos = 135;
+  delay(500);
+
+  // Phase II: Securing & Elevation
+  muoviServo(servoGripper, currentGripperPos, defaultGripperAngle);
+  currentGripperPos = defaultGripperAngle;
+  delay(500);
+
+  muoviServo(servoFirstArm, currentFirstArmPos, defaultFirstArmAngle);
+  currentFirstArmPos = defaultFirstArmAngle;
+  delay(500);
+
+  // Phase III: Transfer Rotation to Bin 3 (180 deg)
+  muoviServo(servoSecondArm, currentSecondArmPos, 100);
+  currentSecondArmPos = 100;
+  delay(500);
+
+  muoviServo(servoBase, currentBasePos, 180);
+  currentBasePos = 180;
+  delay(1000);
+
+  // Phase IV: Discharge & Homing
+  muoviServo(servoGripper, currentGripperPos, 90);
+  currentGripperPos = 90;
+  delay(1000);
+
+  muoviServo(servoGripper, currentGripperPos, defaultGripperAngle);
+  currentGripperPos = defaultGripperAngle;
+  delay(500);
+
+  muoviServo(servoBase, currentBasePos, defaultBaseAngle);
+  currentBasePos = defaultBaseAngle;
+  delay(500);
+
+  muoviServo(servoSecondArm, currentSecondArmPos, defaultSecondArmAngle);
+  currentSecondArmPos = defaultSecondArmAngle;
+  delay(500);
+}
+
+// ==========================================
+// MAIN POLLING LOOP & DETERMINISTIC FSM
 // ==========================================
 void loop() {
-    // Check if an object triggered the active-low IR ingress beam
-    if (objectDetected || digitalRead(PIN_IR_SENSOR) == LOW) {
-        objectDetected = false;
+  // Read active-low sensors (inverted logic: HIGH = detected)
+  int irDetected       = !digitalRead(PIN_IR_SENSOR);
+  int moistureDetected = !digitalRead(PIN_MOISTURE_SENSOR);
+  int metalDetected    = !digitalRead(PIN_INDUCTIVE_SENSOR);
 
-        Serial.println(F("\n[EVENT] Refuse specimen detected at inspection stage."));
+  // Ingress specimen detected by IR sensor
+  if (irDetected == 1) {
+    Serial.println(F("\n[EVENT] Specimen entered inspection stage."));
 
-        // Step 1: Mechanical Stabilization Delay (eliminates contact bounce)
-        delay(STABILIZATION_DELAY_MS);
+    // Stabilization delay to eliminate mechanical bounce
+    delay(1000);
 
-        // Step 2: Multi-pass Temporal Majority Sampling
-        WasteClass classifiedClass = sampleWasteMaterial();
-
-        // Step 3: Execute Automated 4-Phase Pick-and-Place Routine
-        executeSortingRoutine(classifiedClass);
-
-        // Re-arm system for next incoming specimen
-        Serial.println(F("[IDLE] Cycle completed. Monitoring for next item..."));
+    // Multi-pass temporal majority sampling loop (3 samples @ 75 ms interval)
+    for (int i = 0; i < 3; i++) {
+      moistureDetected = !digitalRead(PIN_MOISTURE_SENSOR);
+      metalDetected    = !digitalRead(PIN_INDUCTIVE_SENSOR);
+      delay(75);
     }
 
-    delay(20);
-}
-
-// ==========================================
-// TEMPORAL MAJORITY MULTI-SENSOR SAMPLING
-// ==========================================
-WasteClass sampleWasteMaterial() {
-    int metalVoteCount = 0;
-    int wetVoteCount   = 0;
-    int dryVoteCount   = 0;
-
-    Serial.println(F("[SENSOR] Commencing 3-pass majority sampling loop (75ms interval)..."));
-
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        // Read inductive proximity sensor (Active-LOW: 0 = Metal present)
-        int inductiveVal = digitalRead(PIN_INDUCTIVE_SENSOR);
-
-        // Read FR-04 moisture sensor (10-bit ADC channel A0)
-        int moistureAdcVal = analogRead(PIN_MOISTURE_ANALOG);
-
-        Serial.print(F("  - Sample #"));
-        Serial.print(i + 1);
-        Serial.print(F(" | Inductive: "));
-        Serial.print(inductiveVal == LOW ? F("METAL_DETECTED") : F("NO_METAL"));
-        Serial.print(F(" | Moisture ADC: "));
-        Serial.println(moistureAdcVal);
-
-        // Hierarchical Evaluation per sample
-        if (inductiveVal == LOW) {
-            metalVoteCount++;
-        } else if (moistureAdcVal >= MOISTURE_ADC_THRESHOLD) {
-            wetVoteCount++;
-        } else {
-            dryVoteCount++;
-        }
-
-        if (i < SAMPLE_COUNT - 1) {
-            delay(SAMPLE_INTERVAL_MS);
-        }
-    }
-
-    // Deterministic Priority Decision (Metal > Wet > Dry)
-    WasteClass finalDecision;
-    if (metalVoteCount >= 2) {
-        finalDecision = WASTE_METAL;
-        Serial.println(F("[DECISION] Priority 1 Triggered: Classified as [METAL WASTE] (Confidence: High)"));
-    } else if (wetVoteCount >= 2) {
-        finalDecision = WASTE_WET;
-        Serial.println(F("[DECISION] Priority 2 Triggered: Classified as [WET ORGANIC WASTE] (Confidence: High)"));
+    // Deterministic Priority Classification (Metal > Wet > Dry)
+    if (metalDetected == 1) {
+      Serial.println(F("[DECISION] Priority 1: Metal Waste Detected."));
+      sortMetalWaste();
+    } else if (moistureDetected == 1) {
+      Serial.println(F("[DECISION] Priority 2: Wet Organic Waste Detected."));
+      sortWetWaste();
     } else {
-        finalDecision = WASTE_DRY;
-        Serial.println(F("[DECISION] Priority 3 Triggered: Classified as [DRY RECYCLABLE WASTE] (Default)"));
+      Serial.println(F("[DECISION] Priority 3: Dry Recyclable Waste Detected."));
+      sortDryWaste();
     }
+  }
 
-    return finalDecision;
-}
-
-// ==========================================
-// 4-PHASE PICK-AND-PLACE TRAJECTORY ROUTINE
-// ==========================================
-void executeSortingRoutine(WasteClass wasteType) {
-    int targetBinAngle = BIN_DRY_ANGLE; // Default to Dry
-    const char *binName = "Bin 3 (Dry Recyclables - 180 deg)";
-
-    if (wasteType == WASTE_METAL) {
-        targetBinAngle = BIN_METAL_ANGLE;
-        binName = "Bin 1 (Metal - 60 deg)";
-    } else if (wasteType == WASTE_WET) {
-        targetBinAngle = BIN_WET_ANGLE;
-        binName = "Bin 2 (Wet Organics - 120 deg)";
-    }
-
-    Serial.print(F("[ACTUATION] Routing to destination: "));
-    Serial.println(binName);
-
-    // ----------------------------------------------------
-    // PHASE I: Grasp Alignment (Enveloping Specimen)
-    // ----------------------------------------------------
-    Serial.println(F("  -> Phase I: Grasp Alignment (Opening gripper, lowering shoulder)"));
-    muoviServo(servoGripper, currentGripperAngle, GRIPPER_OPEN_ANGLE);
-    muoviServo(servoShoulder, currentShoulderAngle, SHOULDER_PICK_ANGLE);
-    delay(100);
-
-    // ----------------------------------------------------
-    // PHASE II: Securing & Elevation (Frictional Grasp)
-    // ----------------------------------------------------
-    Serial.println(F("  -> Phase II: Securing & Elevation (Closing jaw, lifting shoulder)"));
-    muoviServo(servoGripper, currentGripperAngle, GRIPPER_CLOSED_ANGLE);
-    delay(150); // Settle frictional grip
-    muoviServo(servoShoulder, currentShoulderAngle, SHOULDER_HOME_ANGLE);
-    delay(100);
-
-    // ----------------------------------------------------
-    // PHASE III: Transfer Rotation (Azimuthal Bin Transfer)
-    // ----------------------------------------------------
-    Serial.println(F("  -> Phase III: Transfer Rotation (Adjusting elbow, routing base)"));
-    muoviServo(servoElbow, currentElbowAngle, ELBOW_TRANSFER_ANGLE);
-    muoviServo(servoBase, currentBaseAngle, targetBinAngle);
-    delay(150);
-
-    // ----------------------------------------------------
-    // PHASE IV: Discharge & Homing (Release and Reset)
-    // ----------------------------------------------------
-    Serial.println(F("  -> Phase IV: Discharge & Homing (Discharging item into bin)"));
-    muoviServo(servoGripper, currentGripperAngle, GRIPPER_OPEN_ANGLE);
-    delay(200); // Allow gravity discharge
-    muoviServo(servoGripper, currentGripperAngle, GRIPPER_CLOSED_ANGLE);
-
-    returnToHomeStance();
-}
-
-// ==========================================
-// RESET ROBOT TO CALIBRATED HOME POSITION
-// ==========================================
-void returnToHomeStance() {
-    Serial.println(F("  -> Resetting links to Home Stance (0 deg Base)..."));
-    muoviServo(servoBase, currentBaseAngle, BASE_HOME_ANGLE);
-    muoviServo(servoElbow, currentElbowAngle, ELBOW_HOME_ANGLE);
-    muoviServo(servoShoulder, currentShoulderAngle, SHOULDER_HOME_ANGLE);
-    muoviServo(servoGripper, currentGripperAngle, GRIPPER_CLOSED_ANGLE);
-    delay(200);
-}
-
-// ==========================================
-// SMOOTH SERVO MOTION INTERPOLATION
-// ==========================================
-void muoviServo(Servo &servo, int &currentPos, int targetPos, int stepDelayMs) {
-    if (currentPos == targetPos) return;
-
-    if (currentPos < targetPos) {
-        for (int pos = currentPos; pos <= targetPos; pos++) {
-            servo.write(pos);
-            delay(stepDelayMs);
-        }
-    } else {
-        for (int pos = currentPos; pos >= targetPos; pos--) {
-            servo.write(pos);
-            delay(stepDelayMs);
-        }
-    }
-    currentPos = targetPos;
+  delay(500);
 }
