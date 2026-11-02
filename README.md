@@ -14,8 +14,8 @@ An ultra-low-cost, autonomous 4-Degree-of-Freedom (4-DOF) robotic manipulator en
 ## 📸 Physical Prototype & Experimental Setup
 
 <div align="center">
-  <img src="docs/assets/robot_prototype.jpg" alt="Fabricated EcoSort 4-DOF Robotic Arm Prototype" width="700"/>
-  <p><em>Figure 1: Fully fabricated EcoSort 4-DOF robotic manipulator, featuring 3D-printed PLA serial revolute links, multi-sensor detection cluster, and 3-bin azimuthal segregation platform.</em></p>
+  <img src="docs/assets/robot_prototype.jpg" alt="Fabricated EcoSort 4-DOF Robotic Sorting Prototype" width="720"/>
+  <p><em>Figure 1: Fabricated EcoSort 4-DOF robotic sorting prototype with sensor cluster, 3D-printed links, power regulation bus, and three-bin collection platform.</em></p>
 </div>
 
 ---
@@ -33,32 +33,17 @@ An ultra-low-cost, autonomous 4-Degree-of-Freedom (4-DOF) robotic manipulator en
 
 ## 🔄 System Architecture & Working Principle
 
+<div align="center">
+  <img src="docs/assets/system_architecture.png" alt="EcoSort System Architecture Block Diagram" width="700"/>
+  <p><em>Figure 2: System architectural block diagram of the EcoSort platform, illustrating sensor acquisition, MCU decision logic, and actuator drive stages.</em></p>
+</div>
+
 The sorting sequence operates as a closed-loop **Sense-Think-Act** routine:
 
-```mermaid
-flowchart TD
-    A([System Boot & Home Stance: 0° Base]) --> B[Poll Ingress IR Sensor Pin 2]
-    B -->|Object Detected: Active-LOW| C[Stabilization Delay: Δt = 200 ms]
-    C --> D[Multi-Pass Sampling: 3x @ 75 ms interval]
-    
-    D --> E{Inductive Sensor<br/>Active-LOW?}
-    E -->|Yes| F[Class: Metal Waste<br/>Route Base to 60°]
-    
-    E -->|No| G{Moisture ADC<br/>V_ADC >= 430?}
-    G -->|Yes| H[Class: Wet Organic Waste<br/>Route Base to 120°]
-    
-    G -->|No| I[Class: Dry Recyclable Waste<br/>Route Base to 180°]
-    
-    F --> J[Execute 4-Phase Pick & Place Trajectory]
-    H --> J
-    I --> J
-    
-    J --> K[Phase I: Envelop Specimen<br/>Gripper 20°->90°, Shoulder 80°->135°]
-    K --> L[Phase II: Frictional Grasp & Lift<br/>Gripper 90°->20°, Shoulder 135°->80°]
-    L --> M[Phase III: Azimuthal Transfer<br/>Elbow 100°, Base to Target Bin Angle]
-    M --> N[Phase IV: Discharge & Return<br/>Gripper Open 90°, Re-close 20°, Home Arm]
-    N --> B
-```
+<div align="center">
+  <img src="docs/assets/decision_flowchart.png" alt="EcoSort Algorithmic Decision Flowchart" width="450"/>
+  <p><em>Figure 3: Algorithmic decision flowchart executed by the embedded firmware, detailing sequential material discrimination and 4-DOF trajectory routing.</em></p>
+</div>
 
 ---
 
@@ -102,6 +87,12 @@ Validation was conducted across **300 real-world municipal refuse items** ($N = 
 - **Wet Waste:** Vegetable peels, fruit pulp, cooked rice scraps, wet tea residue.
 
 ### Classification & Sorting Accuracy ($N=100$ per class)
+
+<div align="center">
+  <img src="docs/assets/accuracy_chart.png" alt="EcoSort Classification Accuracy Chart" width="550"/>
+  <p><em>Figure 4: Classification accuracy and precision metrics across 300 municipal waste trials.</em></p>
+</div>
+
 | Waste Stream | Tested Samples | Correct Segregation | Precision | Recall | Accuracy |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Dry Recyclable Waste** | 100 | 96.5 | 94.61% | 96.50% | **96.50%** |
@@ -153,6 +144,11 @@ Validation was conducted across **300 real-world municipal refuse items** ($N = 
 ---
 
 ## ⚡ Hardware Pinout & Wiring Connections
+
+<div align="center">
+  <img src="docs/assets/electrical_schematic.jpg" alt="EcoSort Electrical Schematic and Wiring Diagram" width="600"/>
+  <p><em>Figure 5: Complete electrical schematic and wiring diagram showing LM2596 power regulation, star grounding, and sensor/servo pin connections.</em></p>
+</div>
 
 ```
       +------------------------------------------------------+
